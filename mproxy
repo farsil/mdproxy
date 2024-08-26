@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import hashlib
+from enum import StrEnum
 from io import BytesIO, TextIOWrapper
 from dataclasses import dataclass, asdict
 import json
@@ -14,24 +15,42 @@ from zipfile import ZipFile
 logger = logging.getLogger(__name__)
 
 
+class ConfigSourceType(StrEnum):
+    REMOTE = "remote"
+    LOCAL = "local"
+
+
+@dataclass(frozen=True)
+class ConfigSource:
+    type: ConfigSourceType
+    url: str
+    entries: list[str]
+    renames: dict[str, str]
+
+    @staticmethod
+    def from_dict(d: dict) -> "ConfigSource":
+        return ConfigSource(
+            url=d["url"],
+            type=ConfigSourceType(d["type"]),
+            entries=d["entries"],
+            renames=d["renames"],
+        )
+
+
 @dataclass(frozen=True)
 class Config:
     id: str
-    source_url: str
     base_url: str
     output_path: str
-    entries: list[str]
-    renames: dict[str, str]
+    sources: dict[str, ConfigSource]
 
     @staticmethod
     def from_dict(d: dict) -> "Config":
         return Config(
             id=d["id"],
             base_url=d["base_url"],
-            source_url=d["source_url"],
             output_path=d["output_path"],
-            entries=d["entries"],
-            renames=d["renames"],
+            sources={k: ConfigSource.from_dict(v) for k, v in d["sources"].items()},
         )
 
     @staticmethod
@@ -125,9 +144,8 @@ def download_file(config: Config, db: Database, src_name: str, proxy_name: str, 
             output_stream.write(response_stream.read())
 
 
-def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
-    files = {}
-    for name in config.entries:
+def append_file_list(files: dict[str, DatabaseFile], config: Config, source_key: str, db: Database) -> None:
+    for name in config.sources[source_key].entries:
         try:
             files[name] = db.files[name]
             if not is_file_valid(config, db, name, name):
@@ -138,7 +156,7 @@ def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
         except IOError:
             logger.error(f"Unable to download file '{name}'")
 
-    for proxy_name, src_name in config.renames.items():
+    for proxy_name, src_name in config.sources[source_key].renames.items():
         try:
             files[proxy_name] = db.files[src_name]
             if not is_file_valid(config, db, src_name, proxy_name):
@@ -148,8 +166,6 @@ def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
             logger.error(f"Filename '{src_name}' not found in {db.db_id}")
         except IOError:
             logger.error(f"Unable to download file '{src_name}'")
-
-    return files
 
 
 def main():
@@ -165,13 +181,15 @@ def main():
         logger.critical(f"Unable to load config file '{sys.argv[1]}'")
         sys.exit(1)
 
-    try:
-        db = Database.download(config.source_url)
-    except IOError:
-        logger.critical(f"Unable to download source database from '{config.source_url}'")
-        sys.exit(1)
+    files = {}
 
-    files = build_file_list(config, db)
+    for source_key, source in config.sources.items():
+        try:
+            db = Database.download(source.url)
+        except IOError:
+            logger.critical(f"Unable to download source database from '{source.url}'")
+            sys.exit(1)
+        append_file_list(files, config, source_key, db)
 
     new_db = Database(
         base_files_url=config.base_url,
