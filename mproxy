@@ -1,0 +1,192 @@
+#!/usr/bin/env python
+import hashlib
+from io import BytesIO, TextIOWrapper
+from dataclasses import dataclass, asdict
+import json
+import logging
+import os.path
+import sys
+import time
+import urllib.request
+import urllib.parse
+from zipfile import ZipFile
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Config:
+    id: str
+    source_url: str
+    base_url: str
+    output_path: str
+    entries: list[str]
+    renames: dict[str, str]
+
+    @staticmethod
+    def from_dict(d: dict) -> "Config":
+        return Config(
+            id=d["id"],
+            base_url=d["base_url"],
+            source_url=d["source_url"],
+            output_path=d["output_path"],
+            entries=d["entries"],
+            renames=d["renames"],
+        )
+
+    @staticmethod
+    def load(path: str) -> "Config":
+        with open(path) as stream:
+            return Config.from_dict(json.load(stream))
+
+
+@dataclass(frozen=True)
+class DatabaseFile:
+    hash: str
+    size: int
+
+    @staticmethod
+    def from_dict(d: dict) -> "DatabaseFile":
+        return DatabaseFile(
+            hash=d["hash"],
+            size=d["size"]
+        )
+
+
+@dataclass(frozen=True)
+class DatabaseFolder:
+    pass
+
+
+@dataclass(frozen=True)
+class Database:
+    base_files_url: str
+    db_id: str
+    db_url: str
+    files: dict[str, DatabaseFile]
+    folders: dict[str, DatabaseFolder]
+    timestamp: int
+
+    def write(self, path: str) -> None:
+        with ZipFile(path, "w") as zip_file:
+            db_file = f"{self.db_id}.json"
+            with zip_file.open(db_file, "w") as db_stream:
+                json.dump(asdict(self), TextIOWrapper(db_stream))
+
+    @staticmethod
+    def from_dict(d: dict) -> "Database":
+        return Database(
+            base_files_url=d["base_files_url"],
+            db_id=d["db_id"],
+            db_url=d["db_url"],
+            files={k: DatabaseFile.from_dict(v) for k, v in d["files"].items()},
+            folders={k: DatabaseFolder() for k in d["folders"].keys()},
+            timestamp=d["timestamp"],
+        )
+
+    @staticmethod
+    def download(url: str) -> "Database":
+        with urllib.request.urlopen(url) as response_stream:
+            zip_stream = BytesIO(response_stream.read())
+            with ZipFile(zip_stream) as zip_file:
+                db_file = zip_file.namelist()[0]
+                with zip_file.open(db_file) as db_stream:
+                    return Database.from_dict(json.load(db_stream))
+
+
+def is_file_valid(src_name: str, proxy_name: str, config: Config, db: Database) -> bool:
+    file_path = os.path.join(config.output_path, proxy_name)
+
+    try:
+        file_size = os.path.getsize(file_path)
+        if file_size != db.files[src_name].size:
+            logger.info(f"File '{proxy_name}' has invalid size, re-downloading")
+            return False
+
+        with open(file_path, "rb") as file_stream:
+            file_hash = hashlib.md5(file_stream.read()).hexdigest()
+            if file_hash != db.files[src_name].hash:
+                logger.info(f"File '{proxy_name}' has invalid hash, re-downloading")
+                return False
+
+    except FileNotFoundError:
+        logger.info(f"File '{proxy_name}' not found, re-downloading")
+        return False
+
+    return True
+
+
+def download_file(src_name: str, proxy_name: str, config: Config, db: Database) -> None:
+    src_url = os.path.join(db.base_files_url, urllib.parse.quote(src_name))
+    with urllib.request.urlopen(src_url) as response_stream:
+        dest_path = os.path.join(config.output_path, proxy_name)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as output_stream:
+            output_stream.write(response_stream.read())
+
+
+def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
+    files = {}
+    for name in config.entries:
+        try:
+            files[name] = db.files[name]
+            if not is_file_valid(name, name, config, db):
+                download_file(name, name, config, db)
+        except KeyError:
+            logger.error(f"Filename '{name}' not found in {db.db_id}")
+        except IOError:
+            logger.error(f"Unable to download file '{name}'")
+
+    for proxy_name, src_name in config.renames.items():
+        try:
+            files[proxy_name] = db.files[src_name]
+            if not is_file_valid(src_name, proxy_name, config, db):
+                download_file(src_name, proxy_name, config, db)
+        except KeyError:
+            logger.error(f"Filename '{src_name}' not found in {db.db_id}")
+        except IOError:
+            logger.error(f"Unable to download file '{src_name}'")
+
+    return files
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    if len(sys.argv) != 2:
+        logger.critical(f"Usage: {os.path.basename(sys.argv[0])} <config_path>")
+        sys.exit(1)
+
+    try:
+        config = Config.load(sys.argv[1])
+    except IOError:
+        logger.critical(f"Unable to load config file '{sys.argv[1]}'")
+        sys.exit(1)
+
+    try:
+        db = Database.download(config.source_url)
+    except IOError:
+        logger.critical(f"Unable to download source database from '{config.source_url}'")
+        sys.exit(1)
+
+    files = build_file_list(config, db)
+
+    new_db = Database(
+        base_files_url=config.base_url,
+        db_id=config.id,
+        db_url=os.path.join(config.base_url, f"{config.id}.json.zip"),
+        files=files,
+        folders={k: DatabaseFolder() for k in files.keys()},
+        timestamp=round(time.time())
+    )
+
+    try:
+        os.makedirs(config.output_path, exist_ok=True)
+        new_db.write(os.path.join(config.output_path, f"{config.id}.json.zip"))
+    except IOError:
+        logger.critical(f"Unable to write proxied database to '{config.output_path}'")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
