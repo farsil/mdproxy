@@ -94,29 +94,29 @@ class Database:
                     return Database.from_dict(json.load(db_stream))
 
 
-def is_file_valid(src_name: str, proxy_name: str, config: Config, db: Database) -> bool:
+def is_file_valid(config: Config, db: Database, src_name: str, proxy_name: str) -> bool:
     file_path = os.path.join(config.output_path, proxy_name)
 
     try:
         file_size = os.path.getsize(file_path)
         if file_size != db.files[src_name].size:
-            logger.info(f"File '{proxy_name}' has invalid size, re-downloading")
+            logger.info(f"File '{proxy_name}' has invalid size")
             return False
 
         with open(file_path, "rb") as file_stream:
             file_hash = hashlib.md5(file_stream.read()).hexdigest()
             if file_hash != db.files[src_name].hash:
-                logger.info(f"File '{proxy_name}' has invalid hash, re-downloading")
+                logger.info(f"File '{proxy_name}' has invalid hash")
                 return False
 
     except FileNotFoundError:
-        logger.info(f"File '{proxy_name}' not found, re-downloading")
+        logger.info(f"File '{proxy_name}' not found")
         return False
 
     return True
 
 
-def download_file(src_name: str, proxy_name: str, config: Config, db: Database) -> None:
+def download_file(config: Config, db: Database, src_name: str, proxy_name: str, ) -> None:
     src_url = os.path.join(db.base_files_url, urllib.parse.quote(src_name))
     with urllib.request.urlopen(src_url) as response_stream:
         dest_path = os.path.join(config.output_path, proxy_name)
@@ -130,8 +130,9 @@ def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
     for name in config.entries:
         try:
             files[name] = db.files[name]
-            if not is_file_valid(name, name, config, db):
-                download_file(name, name, config, db)
+            if not is_file_valid(config, db, name, name):
+                logger.debug(f"Downloading file '{name}'")
+                download_file(config, db, name, name)
         except KeyError:
             logger.error(f"Filename '{name}' not found in {db.db_id}")
         except IOError:
@@ -140,8 +141,9 @@ def build_file_list(config: Config, db: Database) -> dict[str, DatabaseFile]:
     for proxy_name, src_name in config.renames.items():
         try:
             files[proxy_name] = db.files[src_name]
-            if not is_file_valid(src_name, proxy_name, config, db):
-                download_file(src_name, proxy_name, config, db)
+            if not is_file_valid(config, db, src_name, proxy_name):
+                logger.debug(f"Downloading file '{src_name}'")
+                download_file(config, db, src_name, proxy_name)
         except KeyError:
             logger.error(f"Filename '{src_name}' not found in {db.db_id}")
         except IOError:
