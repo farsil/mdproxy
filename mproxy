@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 from dataclasses import dataclass, asdict
-from fnmatch import fnmatch
 import fnmatch
 import hashlib
 from io import BytesIO, TextIOWrapper
 import json
 import logging
-import os.path
-import sys
+from os import path, makedirs
+from sys import argv, exit
 import time
 import urllib.request
 import urllib.parse
@@ -23,9 +22,9 @@ class ConfigSource:
     entries: list[str]
     renames: dict[str, str]
 
-    @staticmethod
-    def from_dict(d: dict) -> "ConfigSource":
-        return ConfigSource(
+    @classmethod
+    def from_dict(cls: "ConfigSource", d: dict) -> "ConfigSource":
+        return cls(
             url=d["url"],
             entries=d["entries"],
             renames=d["renames"],
@@ -39,19 +38,14 @@ class Config:
     output_path: str
     sources: dict[str, ConfigSource]
 
-    @staticmethod
-    def from_dict(d: dict) -> "Config":
-        return Config(
+    @classmethod
+    def from_dict(cls: "Config", d: dict) -> "Config":
+        return cls(
             id=d["id"],
             base_url=d["base_url"],
             output_path=d["output_path"],
             sources={k: ConfigSource.from_dict(v) for k, v in d["sources"].items()},
         )
-
-    @staticmethod
-    def load(path: str) -> "Config":
-        with open(path) as stream:
-            return Config.from_dict(json.load(stream))
 
 
 @dataclass(frozen=True)
@@ -59,9 +53,9 @@ class DatabaseFile:
     hash: str
     size: int
 
-    @staticmethod
-    def from_dict(d: dict) -> "DatabaseFile":
-        return DatabaseFile(
+    @classmethod
+    def from_dict(cls: "DatabaseFile", d: dict) -> "DatabaseFile":
+        return cls(
             hash=d["hash"],
             size=d["size"]
         )
@@ -81,15 +75,9 @@ class Database:
     folders: dict[str, DatabaseFolder]
     timestamp: int
 
-    def write(self, path: str) -> None:
-        with ZipFile(path, "w") as zip_file:
-            db_file = f"{self.db_id}.json"
-            with zip_file.open(db_file, "w") as db_stream:
-                json.dump(asdict(self), TextIOWrapper(db_stream))
-
-    @staticmethod
-    def from_dict(d: dict) -> "Database":
-        return Database(
+    @classmethod
+    def from_dict(cls: "Database", d: dict) -> "Database":
+        return cls(
             base_files_url=d["base_files_url"],
             db_id=d["db_id"],
             db_url=d["db_url"],
@@ -107,9 +95,6 @@ class Database:
                 with zip_file.open(db_file) as db_stream:
                     return Database.from_dict(json.load(db_stream))
 
-
-# TODO: create a SourceManager class that reads from ConfigSource and produces a list of files and folders
-#       which can be used by the RemoteFileManager and the DatabaseBuilder to manage the files/folder and build the DB
 
 @dataclass
 class PathListFile:
@@ -163,29 +148,15 @@ class SourceTransformer:
             return
 
         for local_name, remote_name in self.source_files(source, remote_db):
-            self.pathlist.folders.add(os.path.dirname(remote_name))
+            self.pathlist.folders.add(path.dirname(remote_name))
             self.pathlist.files[local_name] = PathListFile(
                 remote_name=remote_name,
-                remote_url=os.path.join(remote_db.base_files_url, urllib.parse.quote(remote_name)),
+                remote_url=path.join(remote_db.base_files_url, urllib.parse.quote(remote_name)),
                 expected_size=remote_db.files[remote_name].size,
                 expected_hash=remote_db.files[remote_name].hash,
                 local_name=local_name,
-                local_path=os.path.join(self.output_path, local_name)
+                local_path=path.join(self.output_path, local_name)
             )
-
-    @property
-    def db_files(self) -> dict[str, DatabaseFile]:
-        return {
-            f.local_name: DatabaseFile(
-                hash=f.expected_hash,
-                size=f.expected_size
-            )
-            for f in self.pathlist.files.values()
-        }
-
-    @property
-    def db_folders(self) -> dict[str, DatabaseFolder]:
-        return {f: DatabaseFolder() for f in self.pathlist.folders}
 
 
 class FileManager:
@@ -221,48 +192,73 @@ class FileManager:
                     with open(entry.local_path, "wb") as output_stream:
                         output_stream.write(response_stream.read())
 
-    def create_folders(self):
+    def create_folders(self) -> None:
         for folder in self.pathlist.folders:
-            local_path = os.path.join(self.config.output_path, folder)
-            os.makedirs(local_path, exist_ok=True)
+            local_path = path.join(self.config.output_path, folder)
+            makedirs(local_path, exist_ok=True)
+
+
+class DatabaseBuilder:
+    config: Config
+    pathlist: PathList
+
+    def __init__(self, config: Config, pathlist: PathList):
+        self.config = config
+        self.pathlist = pathlist
+
+    def build(self) -> Database:
+        folders = {f: DatabaseFolder() for f in self.pathlist.folders}
+        files = {
+            f.local_name: DatabaseFile(hash=f.expected_hash, size=f.expected_size)
+            for f in self.pathlist.files.values()
+        }
+
+        return Database(
+            base_files_url=self.config.base_url,
+            db_id=self.config.id,
+            db_url=path.join(self.config.base_url, f"{self.config.id}.json.zip"),
+            files=files,
+            folders=folders,
+            timestamp=round(time.time())
+        )
+
+    def save(self) -> None:
+        db = self.build()
+        try:
+            db_path = path.join(self.config.output_path, f"{self.config.id}.json.zip")
+            with ZipFile(db_path, "w") as zip_file:
+                db_file = f"{db.db_id}.json"
+                with zip_file.open(db_file, "w") as db_stream:
+                    json.dump(asdict(db), TextIOWrapper(db_stream))
+        except IOError:
+            logger.critical(f"Unable to write proxied database to '{self.config.output_path}'")
+            exit(1)
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if len(sys.argv) != 2:
-        logger.critical(f"Usage: {os.path.basename(sys.argv[0])} <config_path>")
-        sys.exit(1)
+    if len(argv) != 2:
+        logger.critical(f"Usage: {path.basename(argv[0])} <config_path>")
+        exit(1)
 
     try:
-        config = Config.load(sys.argv[1])
+        with open(argv[1]) as stream:
+            config = Config.from_dict(json.load(stream))
     except IOError:
-        logger.critical(f"Unable to load config file '{sys.argv[1]}'")
-        sys.exit(1)
+        logger.critical(f"Unable to load config file '{argv[1]}'")
+        exit(1)
 
     transformer = SourceTransformer(config.output_path)
     for source in config.sources.values():
         transformer.add_source(source)
 
+    db_builder = DatabaseBuilder(config, transformer.pathlist)
+    db_builder.save()
+
     file_manager = FileManager(config, transformer.pathlist)
     file_manager.create_folders()
     file_manager.download_files()
-
-    new_db = Database(
-        base_files_url=config.base_url,
-        db_id=config.id,
-        db_url=os.path.join(config.base_url, f"{config.id}.json.zip"),
-        files=transformer.db_files,
-        folders=transformer.db_folders,
-        timestamp=round(time.time())
-    )
-
-    try:
-        os.makedirs(config.output_path, exist_ok=True)
-        new_db.write(os.path.join(config.output_path, f"{config.id}.json.zip"))
-    except IOError:
-        logger.critical(f"Unable to write proxied database to '{config.output_path}'")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
