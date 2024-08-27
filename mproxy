@@ -1,15 +1,15 @@
 #!/usr/bin/env python
+
 from dataclasses import dataclass, asdict
 import fnmatch
-import hashlib
+from hashlib import md5
 from io import BytesIO, TextIOWrapper
 import json
 import logging
 from os import path, makedirs
 from sys import argv, exit
 import time
-import urllib.request
-import urllib.parse
+from urllib import parse, request
 from typing import Iterable, Tuple
 from zipfile import ZipFile
 
@@ -86,17 +86,8 @@ class Database:
             timestamp=d["timestamp"],
         )
 
-    @staticmethod
-    def download(url: str) -> "Database":
-        with urllib.request.urlopen(url) as response_stream:
-            zip_stream = BytesIO(response_stream.read())
-            with ZipFile(zip_stream) as zip_file:
-                db_file = zip_file.namelist()[0]
-                with zip_file.open(db_file) as db_stream:
-                    return Database.from_dict(json.load(db_stream))
 
-
-@dataclass
+@dataclass(frozen=True)
 class PathListFile:
     remote_name: str
     remote_url: str
@@ -124,6 +115,15 @@ class SourceTransformer:
         self.pathlist = PathList()
 
     @staticmethod
+    def download_remote_db(url: str) -> Database:
+        with request.urlopen(url) as response_stream:
+            zip_stream = BytesIO(response_stream.read())
+            with ZipFile(zip_stream) as zip_file:
+                db_file = zip_file.namelist()[0]
+                with zip_file.open(db_file) as db_stream:
+                    return Database.from_dict(json.load(db_stream))
+
+    @staticmethod
     def source_files(source: ConfigSource, db: Database) -> Iterable[Tuple[str, str]]:
         # if glob has no magic characters, we can improve performance by not using fnmatch
         for glob in source.entries:
@@ -142,7 +142,7 @@ class SourceTransformer:
 
     def add_source(self, source: ConfigSource) -> None:
         try:
-            remote_db = Database.download(source.url)
+            remote_db = self.download_remote_db(source.url)
         except IOError:
             logger.error(f"Unable to download source database from '{source.url}'")
             return
@@ -151,7 +151,7 @@ class SourceTransformer:
             self.pathlist.folders.add(path.dirname(remote_name))
             self.pathlist.files[local_name] = PathListFile(
                 remote_name=remote_name,
-                remote_url=path.join(remote_db.base_files_url, urllib.parse.quote(remote_name)),
+                remote_url=path.join(remote_db.base_files_url, parse.quote(remote_name)),
                 expected_size=remote_db.files[remote_name].size,
                 expected_hash=remote_db.files[remote_name].hash,
                 local_name=local_name,
@@ -175,7 +175,7 @@ class FileManager:
                 if len(file_content) != file.expected_size:
                     logger.info(f"File '{file.local_name}' has invalid size")
                     return True
-                file_hash = hashlib.md5(file_content).hexdigest()
+                file_hash = md5(file_content).hexdigest()
                 if file_hash != file.expected_hash:
                     logger.info(f"File '{file.local_name}' has invalid hash")
                     return True
@@ -188,7 +188,7 @@ class FileManager:
         for entry in self.pathlist.files.values():
             if self.is_downloading_required(entry):
                 logger.debug(f"Downloading file '{entry.remote_name}'")
-                with urllib.request.urlopen(entry.remote_url) as response_stream:
+                with request.urlopen(entry.remote_url) as response_stream:
                     with open(entry.local_path, "wb") as output_stream:
                         output_stream.write(response_stream.read())
 
