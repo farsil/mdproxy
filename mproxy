@@ -187,15 +187,22 @@ class FileManager:
     def download_files(self) -> None:
         for entry in self.pathlist.files.values():
             if self.is_downloading_required(entry):
-                logger.debug(f"Downloading file '{entry.remote_name}'")
-                with request.urlopen(entry.remote_url) as response_stream:
-                    with open(entry.local_path, "wb") as output_stream:
-                        output_stream.write(response_stream.read())
+                try:
+                    logger.debug(f"Downloading file '{entry.remote_name}'")
+                    with request.urlopen(entry.remote_url) as response_stream:
+                        with open(entry.local_path, "wb") as output_stream:
+                            output_stream.write(response_stream.read())
+                except IOError:
+                    logger.error(f"Unable to download file '{entry.remote_name}'")
 
     def create_folders(self) -> None:
-        for folder in self.pathlist.folders:
-            local_path = path.join(self.config.output_path, folder)
-            makedirs(local_path, exist_ok=True)
+        try:
+            for folder in self.pathlist.folders:
+                local_path = path.join(self.config.output_path, folder)
+                makedirs(local_path, exist_ok=True)
+        except IOError:
+            logger.critical(f"Unable to create output folder '{self.config.output_path}'")
+            exit(1)
 
 
 class DatabaseBuilder:
@@ -223,15 +230,15 @@ class DatabaseBuilder:
         )
 
     def save(self) -> None:
-        db = self.build()
         try:
+            db = self.build()
             db_path = path.join(self.config.output_path, f"{self.config.id}.json.zip")
             with ZipFile(db_path, "w") as zip_file:
                 db_file = f"{db.db_id}.json"
                 with zip_file.open(db_file, "w") as db_stream:
                     json.dump(asdict(db), TextIOWrapper(db_stream))
         except IOError:
-            logger.critical(f"Unable to write proxied database to '{self.config.output_path}'")
+            logger.critical(f"Unable to save proxied database to '{self.config.output_path}'")
             exit(1)
 
 
@@ -253,12 +260,12 @@ def main():
     for source in config.sources.values():
         transformer.add_source(source)
 
-    db_builder = DatabaseBuilder(config, transformer.pathlist)
-    db_builder.save()
-
     file_manager = FileManager(config, transformer.pathlist)
     file_manager.create_folders()
     file_manager.download_files()
+
+    db_builder = DatabaseBuilder(config, transformer.pathlist)
+    db_builder.save()
 
 
 if __name__ == "__main__":
