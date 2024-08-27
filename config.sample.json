@@ -1,7 +1,7 @@
 {
-  "id": "arcade_renames",
+  "id": "arcade",
   "base_url": "https://mister.example.com",
-  "output_path": "out",
+  "output_path": "dist",
   "sources": {
     "mister": {
       "url": "https://raw.githubusercontent.com/MiSTer-devel/Distribution_MiSTer/main/db.json.zip",
