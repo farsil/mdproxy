@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-
+import os
 from dataclasses import dataclass, asdict
 import fnmatch
+import glob
 from hashlib import md5
 from io import BytesIO, TextIOWrapper
 import json
@@ -91,6 +92,7 @@ class Database:
 class PathListFile:
     remote_name: str
     remote_url: str
+    remote_glob: str | None
     expected_size: int
     expected_hash: str
     local_name: str
@@ -124,19 +126,19 @@ class SourceTransformer:
                     return Database.from_dict(json.load(db_stream))
 
     @staticmethod
-    def source_files(source: ConfigSource, db: Database) -> Iterable[Tuple[str, str]]:
+    def source_files(source: ConfigSource, db: Database) -> Iterable[Tuple[str, str, str | None]]:
         # if glob has no magic characters, we can improve performance by not using fnmatch
-        for glob in source.entries:
+        for remote_glob in source.entries:
             try:
-                name = fnmatch.filter(db.files.keys(), glob)[0]
-                yield name, name
+                name = fnmatch.filter(db.files.keys(), remote_glob)[0]
+                yield name, name, None if remote_glob == name else remote_glob
             except IndexError:
-                logger.error(f"No files matching '{glob}' found in {db.db_id}")
+                logger.error(f"No files matching '{remote_glob}' found in {db.db_id}")
 
         for local_name, remote_glob in source.renames.items():
             try:
                 remote_name = fnmatch.filter(db.files.keys(), remote_glob)[0]
-                yield local_name, remote_name
+                yield local_name, remote_name, None if remote_glob == remote_name else remote_glob
             except IndexError:
                 logger.error(f"No files matching '{remote_glob}' found in {db.db_id}")
 
@@ -147,11 +149,12 @@ class SourceTransformer:
             logger.error(f"Unable to download source database from '{source.url}'")
             return
 
-        for local_name, remote_name in self.source_files(source, remote_db):
+        for local_name, remote_name, remote_glob in self.source_files(source, remote_db):
             self.pathlist.folders.add(path.dirname(remote_name))
             self.pathlist.files[local_name] = PathListFile(
                 remote_name=remote_name,
                 remote_url=path.join(remote_db.base_files_url, parse.quote(remote_name)),
+                remote_glob=remote_glob,
                 expected_size=remote_db.files[remote_name].size,
                 expected_hash=remote_db.files[remote_name].hash,
                 local_name=local_name,
@@ -168,7 +171,7 @@ class FileManager:
         self.pathlist = pathlist
 
     @staticmethod
-    def is_downloading_required(file: PathListFile) -> bool:
+    def is_outdated(file: PathListFile) -> bool:
         try:
             with open(file.local_path, "rb") as file_stream:
                 file_content = file_stream.read()
@@ -184,16 +187,32 @@ class FileManager:
             return True
         return False
 
+    def unlink_outdated(self, entry: PathListFile) -> None:
+        if entry.remote_glob:
+            try:
+                for outdated_path in glob.glob(path.join(self.config.output_path, entry.remote_glob)):
+                    logger.info(f"Deleting outdated file '{outdated_path}'")
+                    os.unlink(outdated_path)
+            except IOError:
+                logger.warning(f"Unable to delete files matching '{entry.remote_glob}'")
+        else:
+            logger.debug(f"No glob pattern for {entry.local_name}, skipping deletion")
+
+    @staticmethod
+    def download_updated(entry: PathListFile) -> None:
+        try:
+            logger.info(f"Downloading file '{entry.local_name}'")
+            with request.urlopen(entry.remote_url) as response_stream:
+                with open(entry.local_path, "wb") as output_stream:
+                    output_stream.write(response_stream.read())
+        except IOError:
+            logger.error(f"Unable to download file '{entry.local_name}'")
+
     def download_files(self) -> None:
         for entry in self.pathlist.files.values():
-            if self.is_downloading_required(entry):
-                try:
-                    logger.debug(f"Downloading file '{entry.remote_name}'")
-                    with request.urlopen(entry.remote_url) as response_stream:
-                        with open(entry.local_path, "wb") as output_stream:
-                            output_stream.write(response_stream.read())
-                except IOError:
-                    logger.error(f"Unable to download file '{entry.remote_name}'")
+            if self.is_outdated(entry):
+                self.unlink_outdated(entry)
+                self.download_updated(entry)
 
     def create_folders(self) -> None:
         try:
