@@ -120,28 +120,6 @@ class PathListFile:
     local_name: str
     local_path: str
 
-    def is_downloading_required(self) -> bool:
-        try:
-            with open(self.local_path, "rb") as file_stream:
-                file_content = file_stream.read()
-                if len(file_content) != self.expected_size:
-                    logger.info(f"File '{self.local_name}' has invalid size")
-                    return True
-                file_hash = hashlib.md5(file_content).hexdigest()
-                if file_hash != self.expected_hash:
-                    logger.info(f"File '{self.local_name}' has invalid hash")
-                    return True
-        except FileNotFoundError:
-            logger.info(f"File '{self.local_name}' not found")
-            return True
-        return False
-
-    def download(self) -> None:
-        os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
-        with urllib.request.urlopen(self.remote_url) as response_stream:
-            with open(self.local_path, "wb") as output_stream:
-                output_stream.write(response_stream.read())
-
 
 class PathList:
     files: dict[str, PathListFile]
@@ -154,11 +132,11 @@ class PathList:
 
 class SourceTransformer:
     output_path: str
-    path_list: PathList
+    pathlist: PathList
 
     def __init__(self, output_path: str):
         self.output_path = output_path
-        self.path_list = PathList()
+        self.pathlist = PathList()
 
     @staticmethod
     def source_files(source: ConfigSource, db: Database) -> Iterable[Tuple[str, str]]:
@@ -185,9 +163,8 @@ class SourceTransformer:
             return
 
         for local_name, remote_name in self.source_files(source, remote_db):
-            print(local_name, remote_name)
-            self.path_list.folders.add(os.path.dirname(remote_name))
-            self.path_list.files[local_name] = PathListFile(
+            self.pathlist.folders.add(os.path.dirname(remote_name))
+            self.pathlist.files[local_name] = PathListFile(
                 remote_name=remote_name,
                 remote_url=os.path.join(remote_db.base_files_url, urllib.parse.quote(remote_name)),
                 expected_size=remote_db.files[remote_name].size,
@@ -196,17 +173,6 @@ class SourceTransformer:
                 local_path=os.path.join(self.output_path, local_name)
             )
 
-    def download_files(self) -> None:
-        for entry in self.path_list.files.values():
-            if entry.is_downloading_required():
-                logger.debug(f"Downloading file '{entry.remote_name}'")
-                entry.download()
-
-    def create_folders(self):
-        for folder in self.path_list.folders:
-            local_path = os.path.join(self.output_path, folder)
-            os.makedirs(local_path, exist_ok=True)
-
     @property
     def db_files(self) -> dict[str, DatabaseFile]:
         return {
@@ -214,12 +180,51 @@ class SourceTransformer:
                 hash=f.expected_hash,
                 size=f.expected_size
             )
-            for f in self.path_list.files.values()
+            for f in self.pathlist.files.values()
         }
 
     @property
     def db_folders(self) -> dict[str, DatabaseFolder]:
-        return {f: DatabaseFolder() for f in self.path_list.folders}
+        return {f: DatabaseFolder() for f in self.pathlist.folders}
+
+
+class FileManager:
+    config: Config
+    pathlist: PathList
+
+    def __init__(self, config: Config, pathlist: PathList):
+        self.config = config
+        self.pathlist = pathlist
+
+    @staticmethod
+    def is_downloading_required(file: PathListFile) -> bool:
+        try:
+            with open(file.local_path, "rb") as file_stream:
+                file_content = file_stream.read()
+                if len(file_content) != file.expected_size:
+                    logger.info(f"File '{file.local_name}' has invalid size")
+                    return True
+                file_hash = hashlib.md5(file_content).hexdigest()
+                if file_hash != file.expected_hash:
+                    logger.info(f"File '{file.local_name}' has invalid hash")
+                    return True
+        except FileNotFoundError:
+            logger.info(f"File '{file.local_name}' not found")
+            return True
+        return False
+
+    def download_files(self) -> None:
+        for entry in self.pathlist.files.values():
+            if self.is_downloading_required(entry):
+                logger.debug(f"Downloading file '{entry.remote_name}'")
+                with urllib.request.urlopen(entry.remote_url) as response_stream:
+                    with open(entry.local_path, "wb") as output_stream:
+                        output_stream.write(response_stream.read())
+
+    def create_folders(self):
+        for folder in self.pathlist.folders:
+            local_path = os.path.join(self.config.output_path, folder)
+            os.makedirs(local_path, exist_ok=True)
 
 
 def main():
@@ -236,12 +241,12 @@ def main():
         sys.exit(1)
 
     transformer = SourceTransformer(config.output_path)
-
     for source in config.sources.values():
         transformer.add_source(source)
 
-    transformer.create_folders()
-    transformer.download_files()
+    file_manager = FileManager(config, transformer.pathlist)
+    file_manager.create_folders()
+    file_manager.download_files()
 
     new_db = Database(
         base_files_url=config.base_url,
