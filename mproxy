@@ -112,7 +112,7 @@ class Database:
 #       which can be used by the RemoteFileManager and the DatabaseBuilder to manage the files/folder and build the DB
 
 @dataclass
-class RemoteFileManagerFile:
+class PathListFile:
     remote_name: str
     remote_url: str
     expected_size: int
@@ -143,19 +143,26 @@ class RemoteFileManagerFile:
                 output_stream.write(response_stream.read())
 
 
-class RemoteFileManager:
-    output_path: str
-    files: list[RemoteFileManagerFile]
+class PathList:
+    files: dict[str, PathListFile]
     folders: set[str]
+
+    def __init__(self):
+        self.files = {}
+        self.folders = set()
+
+
+class SourceTransformer:
+    output_path: str
+    path_list: PathList
 
     def __init__(self, output_path: str):
         self.output_path = output_path
-        self.files = []
-        self.folders = set()
+        self.path_list = PathList()
 
     @staticmethod
     def source_files(source: ConfigSource, db: Database) -> Iterable[Tuple[str, str]]:
-        # if glob has no magic characters, we don't need fnmatch
+        # if glob has no magic characters, we can improve performance by not using fnmatch
         for glob in source.entries:
             try:
                 name = fnmatch.filter(db.files.keys(), glob)[0]
@@ -179,24 +186,24 @@ class RemoteFileManager:
 
         for local_name, remote_name in self.source_files(source, remote_db):
             print(local_name, remote_name)
-            self.folders.add(os.path.dirname(remote_name))
-            self.files.append(RemoteFileManagerFile(
+            self.path_list.folders.add(os.path.dirname(remote_name))
+            self.path_list.files[local_name] = PathListFile(
                 remote_name=remote_name,
                 remote_url=os.path.join(remote_db.base_files_url, urllib.parse.quote(remote_name)),
                 expected_size=remote_db.files[remote_name].size,
                 expected_hash=remote_db.files[remote_name].hash,
                 local_name=local_name,
                 local_path=os.path.join(self.output_path, local_name)
-            ))
+            )
 
     def download_files(self) -> None:
-        for entry in self.files:
+        for entry in self.path_list.files.values():
             if entry.is_downloading_required():
                 logger.debug(f"Downloading file '{entry.remote_name}'")
                 entry.download()
 
     def create_folders(self):
-        for folder in self.folders:
+        for folder in self.path_list.folders:
             local_path = os.path.join(self.output_path, folder)
             os.makedirs(local_path, exist_ok=True)
 
@@ -207,12 +214,12 @@ class RemoteFileManager:
                 hash=f.expected_hash,
                 size=f.expected_size
             )
-            for f in self.files
+            for f in self.path_list.files.values()
         }
 
     @property
     def db_folders(self) -> dict[str, DatabaseFolder]:
-        return {f: DatabaseFolder() for f in self.folders}
+        return {f: DatabaseFolder() for f in self.path_list.folders}
 
 
 def main():
@@ -228,20 +235,20 @@ def main():
         logger.critical(f"Unable to load config file '{sys.argv[1]}'")
         sys.exit(1)
 
-    file_manager = RemoteFileManager(config.output_path)
+    transformer = SourceTransformer(config.output_path)
 
     for source in config.sources.values():
-        file_manager.add_source(source)
+        transformer.add_source(source)
 
-    file_manager.create_folders()
-    file_manager.download_files()
+    transformer.create_folders()
+    transformer.download_files()
 
     new_db = Database(
         base_files_url=config.base_url,
         db_id=config.id,
         db_url=os.path.join(config.base_url, f"{config.id}.json.zip"),
-        files=file_manager.db_files,
-        folders=file_manager.db_folders,
+        files=transformer.db_files,
+        folders=transformer.db_folders,
         timestamp=round(time.time())
     )
 
