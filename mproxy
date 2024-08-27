@@ -102,10 +102,12 @@ class PathListFile:
 class PathList:
     files: dict[str, PathListFile]
     folders: set[str]
+    timestamp: int
 
     def __init__(self):
         self.files = {}
         self.folders = set()
+        self.timestamp = 0
 
 
 class SourceTransformer:
@@ -148,6 +150,9 @@ class SourceTransformer:
         except IOError:
             logger.error(f"Unable to download source database from '{source.url}'")
             return
+
+        # use the most recent timestamp
+        self.pathlist.timestamp = max(self.pathlist.timestamp, remote_db.timestamp)
 
         for local_name, remote_name, remote_glob in self.source_files(source, remote_db):
             self.pathlist.folders.add(path.dirname(remote_name))
@@ -245,7 +250,7 @@ class DatabaseBuilder:
             db_url=path.join(self.config.base_url, f"{self.config.id}.json.zip"),
             files=files,
             folders=folders,
-            timestamp=round(time.time())
+            timestamp=self.pathlist.timestamp
         )
 
     def save(self) -> None:
