@@ -8,8 +8,7 @@ from io import BytesIO, TextIOWrapper
 import json
 import logging
 from os import path, makedirs
-from sys import argv, exit
-import time
+import sys
 from urllib import parse, request
 from typing import Iterable, Tuple
 from zipfile import ZipFile
@@ -226,7 +225,7 @@ class FileManager:
                 makedirs(local_path, exist_ok=True)
         except IOError:
             logger.critical(f"Unable to create output folder '{self.config.output_path}'")
-            exit(1)
+            sys.exit(1)
 
 
 class DatabaseBuilder:
@@ -263,22 +262,22 @@ class DatabaseBuilder:
                     json.dump(asdict(db), TextIOWrapper(db_stream))
         except IOError:
             logger.critical(f"Unable to save proxied database to '{self.config.output_path}'")
-            exit(1)
+            sys.exit(1)
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if len(argv) != 2:
-        logger.critical(f"Usage: {path.basename(argv[0])} <config_path>")
-        exit(1)
+    if len(sys.argv) != 2:
+        print(f"Usage: {path.basename(sys.argv[0])} <config_path>", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        with open(argv[1]) as stream:
+        with open(sys.argv[1]) as stream:
             config = Config.from_dict(json.load(stream))
     except IOError:
-        logger.critical(f"Unable to load config file '{argv[1]}'")
-        exit(1)
+        logger.critical(f"Unable to load config file '{sys.argv[1]}'")
+        sys.exit(1)
 
     transformer = SourceTransformer(config.output_path)
     for source in config.sources.values():
