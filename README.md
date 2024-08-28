@@ -13,7 +13,7 @@ install -m 755 mdproxy.py /some/path/mdproxy
 ```
 
 However, a `Makefile` is provided for convenience, if you want to install system-wide
-(defaults to `/usr/bin`):
+(default installation path is `/usr/local/bin`):
 
 ```bash
 sudo make install
