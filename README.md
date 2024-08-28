@@ -12,8 +12,8 @@ Given it's just a file, you may install it to any directory of your choice with 
 install -m 755 mdproxy.py /some/path/mdproxy
 ```
 
-However, a `Makefile` is provided for convenience, if you want to install system-wide
-(default installation path is `/usr/local/bin`):
+However, a `Makefile` is provided for convenience, if you want to install or uninstall system-wide (default installation
+path is `/usr/local/bin`):
 
 ```bash
 sudo make install
