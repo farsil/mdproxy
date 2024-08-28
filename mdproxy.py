@@ -1,16 +1,17 @@
 #!/usr/bin/env python
-import os
+
 from dataclasses import dataclass, asdict
-import fnmatch
-import glob
+from fnmatch import filter as fnfilter
+from glob import glob
 from hashlib import md5
 from io import BytesIO, TextIOWrapper
 import json
 import logging
-from os import path, makedirs
+from os import path, makedirs, unlink
 import sys
-from urllib import parse, request
 from typing import Iterable, Tuple
+from urllib.request import urlopen
+from urllib.parse import quote as urlquote
 from zipfile import ZipFile
 
 logger = logging.getLogger(__name__)
@@ -119,7 +120,7 @@ class SourceTransformer:
 
     @staticmethod
     def download_remote_db(url: str) -> Database:
-        with request.urlopen(url) as response_stream:
+        with urlopen(url) as response_stream:
             zip_stream = BytesIO(response_stream.read())
             with ZipFile(zip_stream) as zip_file:
                 db_file = zip_file.namelist()[0]
@@ -131,14 +132,14 @@ class SourceTransformer:
         # if glob has no magic characters, we can improve performance by not using fnmatch
         for remote_glob in source.entries:
             try:
-                name = fnmatch.filter(db.files.keys(), remote_glob)[0]
+                name = fnfilter(db.files.keys(), remote_glob)[0]
                 yield name, name, None if remote_glob == name else remote_glob
             except IndexError:
                 logger.error(f"No files matching '{remote_glob}' found in {db.db_id}")
 
         for local_name, remote_glob in source.renames.items():
             try:
-                remote_name = fnmatch.filter(db.files.keys(), remote_glob)[0]
+                remote_name = fnfilter(db.files.keys(), remote_glob)[0]
                 yield local_name, remote_name, None if remote_glob == remote_name else remote_glob
             except IndexError:
                 logger.error(f"No files matching '{remote_glob}' found in {db.db_id}")
@@ -157,7 +158,7 @@ class SourceTransformer:
             self.pathlist.folders.add(path.dirname(remote_name))
             self.pathlist.files[local_name] = PathListFile(
                 remote_name=remote_name,
-                remote_url=path.join(remote_db.base_files_url, parse.quote(remote_name)),
+                remote_url=path.join(remote_db.base_files_url, urlquote(remote_name)),
                 remote_glob=remote_glob,
                 expected_size=remote_db.files[remote_name].size,
                 expected_hash=remote_db.files[remote_name].hash,
@@ -194,9 +195,9 @@ class FileManager:
     def unlink_outdated(self, entry: PathListFile) -> None:
         if entry.remote_glob:
             try:
-                for outdated_path in glob.glob(path.join(self.config.output_path, entry.remote_glob)):
+                for outdated_path in glob(path.join(self.config.output_path, entry.remote_glob)):
                     logger.info(f"Deleting outdated file '{outdated_path}'")
-                    os.unlink(outdated_path)
+                    unlink(outdated_path)
             except IOError:
                 logger.warning(f"Unable to delete files matching '{entry.remote_glob}'")
         else:
@@ -206,7 +207,7 @@ class FileManager:
     def download_updated(entry: PathListFile) -> None:
         try:
             logger.info(f"Downloading file '{entry.local_name}'")
-            with request.urlopen(entry.remote_url) as response_stream:
+            with urlopen(entry.remote_url) as response_stream:
                 with open(entry.local_path, "wb") as output_stream:
                     output_stream.write(response_stream.read())
         except IOError:
